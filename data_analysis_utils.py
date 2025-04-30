@@ -1,4 +1,3 @@
-
 import pandas as pd
 import polars as pl
 import os
@@ -9,10 +8,9 @@ class DataExplorer:
     def __init__(self):
         pass
 
-    def load_data(self,path):
+    def load_data(self,path) -> pd.DataFrame:
         return pd.read_csv(path, low_memory=False)
-    
-
+        
     def get_expedia_data_info(self,df: pd.DataFrame):
         """
         Get detailed information about a wide-format Expedia dataset.
