@@ -8,8 +8,21 @@ class DataPreparer:
     def __init__(self):
         pass
 
-    def load_data(self,path) -> pl.DataFrame:
-        return pl.read_csv(path, low_memory=False)
+    def load_and_preprocess_data(self, old_file_name: str, new_file_name:str) -> None:
+        """
+        Load and preprocess the data from a CSV file.
+        """
+        # Load the data
+        df = self.load_data(old_file_name)
+        
+        # Shrink data types
+        df = self.shrink_data_types(df)
+        
+        self.upload_data(df, new_file_name)
+
+    def load_data(self,old_file_name:str, folder:str="data") -> pl.DataFrame:
+        path = folder + "/" + old_file_name
+        return pl.read_csv(path, low_memory=False, null_values=["NA", "N/A", "null", "NULL", "NaN"])
     
     def shrink_data_types(self, df: pl.DataFrame) -> pl.DataFrame:
         """
