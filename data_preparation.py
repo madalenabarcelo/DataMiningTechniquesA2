@@ -1,8 +1,8 @@
 import pandas as pd
 import polars as pl
+import numpy as np
 import os
-import matplotlib.pyplot as plt
-import seaborn as sns
+
 
 class DataPreparer:
     def __init__(self):
@@ -20,9 +20,6 @@ class DataPreparer:
         # These are the columns where zero has some meaning
         self.flag_zero_columns = ["prop_review_score", "prop_log_historical_price"]
 
-        # Categorical features are allowed to be strings
-        self.categorical_features = ["site_id", "visitor_location_country_id", "prop_country_id", "srch_destination_id"]
-
     def load_and_preprocess_data(self, old_file_name: str, new_file_name:str) -> None:
         """
         Load and preprocess the data from a CSV file.
@@ -39,6 +36,7 @@ class DataPreparer:
         # Shrink data types before processing to make it faster
         df = self.shrink_data_types(df)
 
+
         # Add flag columns for null and zeros to the DataFrame
         df = self.handle_missing_values(df)
 
@@ -46,9 +44,8 @@ class DataPreparer:
         df = self.add_features(df)
 
         # Shrink data types again after processing to save memory
-        df = self.shrink_data_types(df)
+        df = self.convert_to_pandas(df)
         
-        df = self.cast_categorical_features(df)
         # Save the processed data as parquet
         self.upload_data(df, new_file_name)
 
@@ -127,12 +124,12 @@ class DataPreparer:
                 ).drop(f"{col}_mean")
 
         for col in self.flag_zero_columns:
-            # Create a flag column for each column in the list
-            df = df.with_columns((pl.col(col) == 0).cast(pl.Int8).alias(f"{col}_zero_flag"))
             # From what I see the zero value could be interpreted by the model as a value rather than a missing data flag
             # Therefore it makes sense to replace the zero value with nan
-            df = df.with_columns(pl.when(pl.col(col) == 0).then(None).otherwise(pl.col(col)).alias(col))
             # Also for both current columns imputing it does not make sense so keep it nan
+            df = df.with_columns(pl.when(pl.col(col) == 0).then(None).otherwise(pl.col(col)).alias(col))
+            # Create a flag column for each column in the list
+            df = df.with_columns((pl.col(col).is_null()).cast(pl.Int8).alias(f"{col}_zero_flag"))
 
         ### Consider what to do with nan in original columns (see notes)
         ### Consider what to do with prop_starrating (see notes)
@@ -148,18 +145,28 @@ class DataPreparer:
             .then(1).otherwise(0).alias("prop_in_visitor_country"),
         ])
 
-        
         return df
     
-    def cast_categorical_features(self, df: pl.DataFrame) -> pl.DataFrame:
-        """
-        Cast categorical features to the appropriate type.
-        """
-        for col in self.categorical_features:
-            df = df.with_columns(pl.col(col).cast(pl.String))
-        return df
+    def convert_to_pandas(self, df: pl.DataFrame) -> pd.DataFrame:
+        """Convert the Polars DataFrame to a Pandas DataFrame and shrink the data types as much as possible."""
+        # Convert to Pandas DataFrame
+        df_pd = df.to_pandas()
 
-    def upload_data(self, df: pl.DataFrame, file_name: str, folder: str = "data") -> None:
+        # Shrink the float types of the DataFrame
+        # This first batch was acting difficult so im just doing it manually (due to nan values in int columns)
+        for col in [f"comp{i}_rate_percent_diff" for i in range(1, 9)]:
+            df_pd[col] = df_pd[col].astype("Int32")
+        # These are then the other comp columns that were annoying
+        for col in df_pd.select_dtypes(include=["float64"]).columns:
+            df_pd[col] = df_pd[col].astype("Int8")
+
+        # With pandas we can use the float16 type
+        df_pd = df_pd.astype({col: np.float16 for col in df_pd.select_dtypes(include=["float32"]).columns})
+
+        return df_pd
+
+
+    def upload_data(self, df: pd.DataFrame, file_name: str, folder: str = "data") -> None:
         """
         Upload a Polars DataFrame to a CSV file.
         """
@@ -170,5 +177,5 @@ class DataPreparer:
         if os.path.exists(path):
             os.remove(path)
         # Save the DataFrame as a parquet file
-        df.write_parquet(path)
+        df.to_parquet(path)
         print(f"Data uploaded to {path}")
