@@ -20,6 +20,9 @@ class DataPreparer:
         # These are the columns where zero has some meaning
         self.flag_zero_columns = ["prop_review_score", "prop_log_historical_price"]
 
+        # Categorical features are allowed to be strings
+        self.categorical_features = ["site_id", "visitor_location_country_id", "prop_country_id", "srch_destination_id"]
+
     def load_and_preprocess_data(self, old_file_name: str, new_file_name:str) -> None:
         """
         Load and preprocess the data from a CSV file.
@@ -45,6 +48,7 @@ class DataPreparer:
         # Shrink data types again after processing to save memory
         df = self.shrink_data_types(df)
         
+        df = self.cast_categorical_features(df)
         # Save the processed data as parquet
         self.upload_data(df, new_file_name)
 
@@ -145,6 +149,14 @@ class DataPreparer:
         ])
 
         
+        return df
+    
+    def cast_categorical_features(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Cast categorical features to the appropriate type.
+        """
+        for col in self.categorical_features:
+            df = df.with_columns(pl.col(col).cast(pl.String))
         return df
 
     def upload_data(self, df: pl.DataFrame, file_name: str, folder: str = "data") -> None:

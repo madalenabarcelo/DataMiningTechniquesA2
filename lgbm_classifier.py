@@ -1,15 +1,19 @@
 # 1. Imports
 import polars as pl
 import numpy as np
+import pandas as pd
 from lightgbm import LGBMClassifier, early_stopping, log_evaluation
 from sklearn.model_selection import GroupKFold
 from sklearn.metrics import roc_auc_score
 
 class LGBMClassifierModel:
-    def __init__(self, **kwargs):
+    def __init__(self, df:pl.DataFrame,  **kwargs):
         self.model = LGBMClassifier(**kwargs)
+        self.feature_cols = self.get_feature_cols(df)
+        self.schema = df.select(self.feature_cols).collect_schema()
         # Categorical features should be passed explicitly to the model, these do not include the indentifying columns (srch_id, prop_id)
         self.categorical_features = ["site_id", "visitor_location_country_id", "prop_country_id", "srch_destination_id"]
+        self.categorical_indices = [self.feature_cols.index(c) for c in self.categorical_features]
 
     def format_and_train(self, train_df:pl.DataFrame) -> None:
         """Format the training data and train the model."""
@@ -20,7 +24,7 @@ class LGBMClassifierModel:
         self.fit(X_train, y_train, X_val, y_val)
         return X_train, y_train, X_val, y_val, val_idx
 
-    def format_data(self, df:pl.DataFrame, target:str = "click_bool", group: str = "srch_id") -> tuple[np.array, np.array, np.array, np.array, np.array]:
+    def format_data(self, df:pl.DataFrame, target:str = "click_bool", group: str = "srch_id") -> tuple[pl.DataFrame, np.array, pl.DataFrame, np.array, np.array]:
         """Format the data for LightGBM."""
         X = self.get_X(df)
         y = df[target].to_numpy()
@@ -28,12 +32,12 @@ class LGBMClassifierModel:
 
         # Split the data into training and validation sets
         X_train, y_train, X_val, y_val, val_idx = self.train_val_split(X, y, groups)
+
         return X_train, y_train, X_val, y_val, val_idx
     
     def get_X(self, df:pl.DataFrame) -> np.array:
         """Get the feature matrix from the DataFrame."""
-        feature_cols = self.get_feature_cols(df)
-        X = df.select(feature_cols).to_numpy()
+        X = df.select(self.feature_cols).to_numpy()
         return X
 
     def get_feature_cols(self, df:pl.DataFrame) -> list[str]:
@@ -62,12 +66,13 @@ class LGBMClassifierModel:
     def fit(self, X_train:np.array, y_train:np.array, X_val:np.array, y_val:np.array, eval_metric: str = "auc", 
             early_stopping_rounds:int = 50, verbose:int = 20) -> None:
         """Fit the model."""
+        # Fit the model
         self.model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
             eval_metric=eval_metric,
             callbacks=[early_stopping(early_stopping_rounds), log_evaluation(verbose)],
-            categorical_feature=self.categorical_features,
+            categorical_feature=self.categorical_indices,
         )
 
     def evaluate_validation(self, X_val:np.array, y_val:np.array, train_df: pl.DataFrame, val_idx) -> float:
