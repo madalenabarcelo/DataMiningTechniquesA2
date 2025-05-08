@@ -36,7 +36,6 @@ class DataPreparer:
         # Shrink data types before processing to make it faster
         df = self.shrink_data_types(df)
 
-
         # Add flag columns for null and zeros to the DataFrame
         df = self.handle_missing_values(df)
 
@@ -109,7 +108,7 @@ class DataPreparer:
             for col in self.impute_null_columns:
                 # Do with mean for now
                 df_mean = df.group_by("srch_id").agg([
-                    pl.col(col).mean().alias(f"{col}_mean")
+                    pl.col(col).mean().cast(pl.Float32).alias(f"{col}_mean")
                 ])
             # Merge the mean values back to the original DataFrame
             df = df.join(df_mean, on="srch_id", how="left")
@@ -142,7 +141,7 @@ class DataPreparer:
         df = df.with_columns([
             pl.col("srch_id").count().over("srch_id").alias("result_count"),
             pl.when(pl.col("visitor_location_country_id") == pl.col("prop_country_id"))
-            .then(1).otherwise(0).alias("prop_in_visitor_country"),
+            .then(1).otherwise(0).cast(pl.Int8).alias("prop_in_visitor_country"),
         ])
 
         return df

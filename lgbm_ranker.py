@@ -19,10 +19,10 @@ class LGBMRankerModel:
         self.fit(X_train, y_train, X_val, y_val, groups_size_train, groups_size_val)
         return X_train, y_train, X_val, y_val, groups_size_train, groups_size_val
     
-    def format_data(self, df:pd.DataFrame, target:str = "click_bool", group: str = "srch_id") -> tuple[pd.DataFrame, np.array, pd.DataFrame, np.array, np.array]:
+    def format_data(self, df:pd.DataFrame, group: str = "srch_id") -> tuple[pd.DataFrame, np.array, pd.DataFrame, np.array, np.array]:
         """Format the data for LightGBM."""
         X = self.get_X(df)
-        y = df[target].to_numpy()
+        y = 5 * df["booking_bool"] + 1 * df["click_bool"]
         groups = df[group].to_numpy()
 
         # Split the data into training and validation sets
@@ -78,7 +78,15 @@ class LGBMRankerModel:
             categorical_feature=self.categorical_features,
         )
 
-    def get_final_predictions(self, df:pd.DataFrame) -> np.array:
+    def save_final_results(self, df:pd.DataFrame, file_name:str= "final_predictions") -> None:
+        """Save the final results to a CSV file."""
+        df = self.get_final_predictions(df).drop(columns=["predictions"])
+        # Save the DataFrame as a CSV file
+        path  = "data/" + file_name + ".csv"
+        df.to_csv(path, index=False)
+        print(f"Final results saved to {file_name}")
+
+    def get_final_predictions(self, df:pd.DataFrame) -> pd.DataFrame:
         """Get the property predictions for the test set."""
         df = self.add_predictions(df)
         return df[['srch_id', 'prop_id', 'predictions']]
