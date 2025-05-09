@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import os
 from lightgbm import LGBMRanker, early_stopping, log_evaluation
 from sklearn.model_selection import GroupKFold
 
@@ -66,10 +67,10 @@ class LGBMRankerModel:
         return X_train, y_train, X_val, y_val, groups_size_train, groups_size_val
 
     def fit(self,X_train:pd.DataFrame, y_train:np.array, X_val:pd.DataFrame, y_val:np.array, groups_size_train:np.array,
-            groups_size_val:np.array, early_stopping_rounds:int = 50, verbose:int = 20) -> None:
+            groups_size_val:np.array, early_stopping_rounds:int = 50, verbose:int = 20) -> LGBMRanker:
         """Fit the model."""
         # Fit the model
-        self.ranker.fit(
+        fitted_model = self.ranker.fit(
             X_train, y_train,
             group=groups_size_train,  # counts per srch_id
             eval_set=[(X_val, y_val)],
@@ -77,14 +78,18 @@ class LGBMRankerModel:
             callbacks=[early_stopping(early_stopping_rounds), log_evaluation(verbose)],
             categorical_feature=self.categorical_features,
         )
+        return fitted_model
 
     def save_final_results(self, df:pd.DataFrame, file_name:str= "final_predictions") -> None:
         """Save the final results to a CSV file."""
         df = self.get_final_predictions(df).drop(columns=["predictions"])
         # Save the DataFrame as a CSV file
         path  = "data/" + file_name + ".csv"
+        if os.path.exists(path):
+            os.remove(path)
         df.to_csv(path, index=False)
         print(f"Final results saved to {file_name}")
+        print(df)
 
     def get_final_predictions(self, df:pd.DataFrame) -> pd.DataFrame:
         """Get the property predictions for the test set."""

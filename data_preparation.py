@@ -2,10 +2,10 @@ import pandas as pd
 import polars as pl
 import numpy as np
 import os
-
+from typing import Optional
 
 class DataPreparer:
-    def __init__(self):
+    def __init__(self, impute_null_columns: Optional[list] = None):
         # These are the columns where nan has some meaning
         self.flag_columns = (
             ["visitor_hist_starrating", "visitor_hist_adr_usd", "prop_review_score", 
@@ -14,13 +14,17 @@ class DataPreparer:
             + [f"comp{i}_inv" for i in range(1, 9)]
             + [f"comp{i}_rate_percent_diff" for i in range(1, 9)]
         )
-        # In these columns we will impute the null values with either the mean, median or whatever (to be decided)
-        self.impute_null_columns = [] 
-        
         # These are the columns where zero has some meaning
         self.flag_zero_columns = ["prop_review_score", "prop_log_historical_price"]
 
-    def load_and_preprocess_data(self, old_file_name: str, new_file_name:str) -> None:
+        if impute_null_columns is not None:
+            self.impute_null_columns = impute_null_columns
+        else:
+            # In these columns we will impute the null values with either the mean, median or whatever (to be decided)
+            self.impute_null_columns = {}
+        
+
+    def load_and_preprocess_data(self, old_file_name: str, new_file_name:Optional[str] = None, upload:bool = True) -> Optional[pd.DataFrame]:
         """
         Load and preprocess the data from a CSV file.
         """
@@ -45,8 +49,11 @@ class DataPreparer:
         # Shrink data types again after processing to save memory
         df = self.convert_to_pandas(df)
         
-        # Save the processed data as parquet
-        self.upload_data(df, new_file_name)
+        if upload:
+            # Save the processed data as parquet
+            self.upload_data(df, new_file_name)
+        else:
+            return df
 
     def load_data(self,old_file_name:str, folder:str="data") -> pl.DataFrame:
         path = folder + "/" + old_file_name
@@ -99,38 +106,39 @@ class DataPreparer:
         For selected columns, the null values are imputed with the mean of the column grouped by "srch_id".
         The zero values in the specified columns are also flagged and replaced with NaN.
         """
+        # Before handling missing values, we set the np.inf in price_usd to nan
+        df = df.with_columns(pl.when(pl.col("price_usd") == np.inf).then(None).otherwise(pl.col("price_usd")).cast(pl.Float32).alias("price_usd"))
+
         for col in self.flag_columns:
             # Create a flag column for each column in the list
             df = df.with_columns((pl.col(col).is_null()).cast(pl.Int8).alias(f"{col}_flag"))
 
+        for col in self.flag_zero_columns:
+            if col in self.flag_columns:
+                # If the column is also in the flag_columns, we should not confuscate the null and zero values when imputing
+                # So we only create a flag column
+                df = df.with_columns((pl.col(col) == 0).cast(pl.Int8).alias(f"{col}_zero_flag"))
+            else:
+                # From what I see the zero value could be interpreted by the model as a value rather than a missing data flag
+                # Therefore it makes sense to replace the zero value with nan
+                # Also for both current columns imputing it does not make sense so keep it nan
+                df = df.with_columns(pl.when(pl.col(col) == 0).then(None).otherwise(pl.col(col)).alias(col))
+                # Create a flag column for each column in the list
+                df = df.with_columns((pl.col(col).is_null()).cast(pl.Int8).alias(f"{col}_zero_flag"))
+
         if len(self.impute_null_columns) > 0:
             # For the columns where we want to impute the null values, we use the mean grouped by "srch_id" and replace
             for col in self.impute_null_columns:
-                # Do with mean for now
-                df_mean = df.group_by("srch_id").agg([
-                    pl.col(col).mean().cast(pl.Float32).alias(f"{col}_mean")
-                ])
-            # Merge the mean values back to the original DataFrame
-            df = df.join(df_mean, on="srch_id", how="left")
-
-            for col in self.impute_null_columns:
-                # Impute the null values with the mean values
-                df = df.with_columns(
-                    pl.when(pl.col(col).is_null())
-                    .then(pl.col(f"{col}_mean"))
-                    .otherwise(pl.col(col))
-                    .alias(col)
-                ).drop(f"{col}_mean")
-
-        for col in self.flag_zero_columns:
-            # From what I see the zero value could be interpreted by the model as a value rather than a missing data flag
-            # Therefore it makes sense to replace the zero value with nan
-            # Also for both current columns imputing it does not make sense so keep it nan
+                if self.impute_null_columns[col] == "mean":
+                    df = df.with_columns(pl.col(col).cast(pl.Float32))
+                    df = df.with_columns(pl.when(pl.col(col).is_null()).then(pl.col(col).mean()).otherwise(pl.col(col)).alias(col))
+                elif self.impute_null_columns[col] == "median":
+                    df = df.with_columns(pl.when(pl.col(col).is_null()).then(pl.col(col).median()).otherwise(pl.col(col)).alias(col))
+        
+        # Now we set the zero values to nan for the columns in both the flag and flag_zero columns
+        for col in (set(self.flag_zero_columns) - set(self.flag_columns)):
             df = df.with_columns(pl.when(pl.col(col) == 0).then(None).otherwise(pl.col(col)).alias(col))
-            # Create a flag column for each column in the list
-            df = df.with_columns((pl.col(col).is_null()).cast(pl.Int8).alias(f"{col}_zero_flag"))
 
-        ### Consider what to do with nan in original columns (see notes)
         ### Consider what to do with prop_starrating (see notes)
         return df
     
@@ -143,6 +151,14 @@ class DataPreparer:
             pl.when(pl.col("visitor_location_country_id") == pl.col("prop_country_id"))
             .then(1).otherwise(0).cast(pl.Int8).alias("prop_in_visitor_country"),
         ])
+
+        # Add averages per prop_id (mainly just to reduce noise I think in pricing)
+        for col in ["price_usd", "prop_log_historical_price", "prop_starrating", "prop_review_score", "prop_location_score1", "prop_location_score2"]:
+            df = df.with_columns([
+                pl.col(col).mean().over("prop_id").cast(pl.Float32).alias(f"{col}_mean_over_prop_id"),
+                pl.col(col).median().over("prop_id").cast(pl.Float32).alias(f"{col}_median_over_prop_id"),
+                pl.col(col).std().over("prop_id").cast(pl.Float32).alias(f"{col}_std_over_prop_id"),
+            ])
 
         return df
     
