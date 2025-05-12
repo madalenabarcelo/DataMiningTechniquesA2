@@ -5,7 +5,8 @@ import os
 from typing import Optional
 
 class DataPreparer:
-    def __init__(self, impute_null_columns: Optional[list] = None):
+    def __init__(self, impute_null_columns: Optional[list] = None, 
+                 categorical_features_threshold: Optional[dict] = None):
         # These are the columns where nan has some meaning
         self.flag_columns = (
             ["visitor_hist_starrating", "visitor_hist_adr_usd", "prop_review_score", 
@@ -22,6 +23,9 @@ class DataPreparer:
         else:
             # In these columns we will impute the null values with either the mean, median or whatever (to be decided)
             self.impute_null_columns = {}
+
+        self.categorical_features_threshold = categorical_features_threshold if categorical_features_threshold is not None else {}
+        # self.categorical_features_threshold = {}
         
 
     def load_and_preprocess_data(self, old_file_name: str, new_file_name:Optional[str] = None, upload:bool = True) -> Optional[pd.DataFrame]:
@@ -45,6 +49,9 @@ class DataPreparer:
 
         # Add features to the DataFrame
         df = self.add_features(df)
+
+        # Reduce cardinality of the categorical columns
+        df = self.reduce_cardinality(df)
 
         # Shrink data types again after processing to save memory
         df = self.convert_to_pandas(df)
@@ -162,6 +169,22 @@ class DataPreparer:
 
         return df
     
+    def reduce_cardinality(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Reduce the cardinality of the categorical columns in the DataFrame. Due to limitations im just gonna hard code this for now
+        """
+        if len(self.categorical_features_threshold) > 0:
+            for col, threshold in self.categorical_features_threshold.items():
+                original_type = df[col].dtype
+                value_counts_df = df[col].value_counts()
+                # Filter to values with count < threshold
+                rare_values = value_counts_df.filter(pl.col("count") < threshold).select(col).to_series().to_list()
+                # Replace those values with 0
+                replacements = {val: 0 for val in rare_values}
+                df = df.with_columns(pl.col(col).replace(replacements).cast(original_type).alias(col))
+
+        return df
+
     def convert_to_pandas(self, df: pl.DataFrame) -> pd.DataFrame:
         """Convert the Polars DataFrame to a Pandas DataFrame and shrink the data types as much as possible."""
         # Convert to Pandas DataFrame
@@ -176,7 +199,8 @@ class DataPreparer:
             df_pd[col] = df_pd[col].astype("Int8")
 
         # With pandas we can use the float16 type
-        df_pd = df_pd.astype({col: np.float16 for col in df_pd.select_dtypes(include=["float32"]).columns})
+        # For some reason the price_usd columns return inf values so we'll just keep them as float32
+        df_pd = df_pd.astype({col: np.float16 for col in df_pd.select_dtypes(include=["float32"]).columns if col.startswith("price_usd")})
 
         return df_pd
 

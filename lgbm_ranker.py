@@ -3,6 +3,7 @@ import pandas as pd
 import os
 from lightgbm import LGBMRanker, early_stopping, log_evaluation
 from sklearn.model_selection import GroupKFold
+from sklearn.utils import shuffle
 
 class LGBMRankerModel:
     def __init__(self, df:pd.DataFrame,  **kwargs):
