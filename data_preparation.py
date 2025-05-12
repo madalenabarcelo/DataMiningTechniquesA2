@@ -160,13 +160,17 @@ class DataPreparer:
         ])
 
         # Add averages per prop_id (mainly just to reduce noise I think in pricing)
-        for col in ["price_usd", "prop_log_historical_price", "prop_starrating", "prop_review_score", "prop_location_score1", "prop_location_score2"]:
+        for col in ["price_usd", "prop_log_historical_price", "prop_location_score1", "prop_location_score2"]:
             df = df.with_columns([
                 pl.col(col).mean().over("prop_id").cast(pl.Float32).alias(f"{col}_mean_over_prop_id"),
-                pl.col(col).median().over("prop_id").cast(pl.Float32).alias(f"{col}_median_over_prop_id"),
                 pl.col(col).std().over("prop_id").cast(pl.Float32).alias(f"{col}_std_over_prop_id"),
             ])
 
+        for col in ["prop_starrating", "prop_review_score"]:
+            df = df.with_columns([
+                pl.col(col).median().over("prop_id").cast(pl.Float32).alias(f"{col}_median_over_prop_id"),
+                pl.col(col).std().over("prop_id").cast(pl.Float32).alias(f"{col}_std_over_prop_id"),
+            ])
         return df
     
     def reduce_cardinality(self, df: pl.DataFrame) -> pl.DataFrame:

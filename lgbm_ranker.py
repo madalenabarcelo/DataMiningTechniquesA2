@@ -23,6 +23,7 @@ class LGBMRankerModel:
     
     def format_data(self, df:pd.DataFrame, group: str = "srch_id") -> tuple[pd.DataFrame, np.array, pd.DataFrame, np.array, np.array]:
         """Format the data for LightGBM."""
+        df = self.remove_features(df)
         X = self.get_X(df)
         y = 5 * df["booking_bool"] + 1 * df["click_bool"]
         groups = df[group].to_numpy()
@@ -31,6 +32,11 @@ class LGBMRankerModel:
         X_train, y_train, X_val, y_val, groups_size_train, groups_size_val = self.train_val_split(X, y, groups)
 
         return X_train, y_train, X_val, y_val, groups_size_train, groups_size_val
+    
+    def remove_features(self, df:pd.DataFrame) -> pd.DataFrame:
+        features_to_remove = ["comp1_inv_flag", "comp2_inv_flag", "comp6_inv_flag", "comp8_inv_flag", "prop_log_historical_price_zero_flag"]
+        self.feature_cols = [col for col in self.feature_cols if col not in features_to_remove]
+        return df.drop(columns=features_to_remove)
     
     def get_X(self, df:pd.DataFrame) -> pd.DataFrame:
         """Get the feature matrix from the DataFrame."""
@@ -68,7 +74,7 @@ class LGBMRankerModel:
         return X_train, y_train, X_val, y_val, groups_size_train, groups_size_val
 
     def fit(self,X_train:pd.DataFrame, y_train:np.array, X_val:pd.DataFrame, y_val:np.array, groups_size_train:np.array,
-            groups_size_val:np.array, early_stopping_rounds:int = 50, verbose:int = 20) -> LGBMRanker:
+            groups_size_val:np.array, early_stopping_rounds:int = 80, verbose:int = 100) -> LGBMRanker:
         """Fit the model."""
         # Fit the model
         fitted_model = self.ranker.fit(
