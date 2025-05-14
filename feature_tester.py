@@ -6,6 +6,7 @@ import numpy as np
 from sklearn.model_selection import GroupKFold
 from sklearn.metrics import ndcg_score
 import optuna
+import os
 
 
 class FeatureTester:
@@ -117,3 +118,60 @@ class FeatureTester:
         print("Best trial:")
         print(study.best_trial)
         return study.best_params
+    
+    def full_feature_selection(self, train_df, feature_counts):
+        """
+        Full feature selection using LightGBM Ranker.
+        Returns the best features and their importance.
+        """
+        X_train, y_train, X_val, y_val, groups_size_train, groups_size_val = self.model.format_data(train_df)
+        # First train the model with all features
+        model_full = copy.deepcopy(self.model)
+        model_full.fit(X_train, y_train, X_val, y_val, groups_size_train, groups_size_val)
+
+        # Get feature importance
+        importances_df = self.get_feature_importance(model_full,self.model.feature_cols)
+        
+        # Evaluate top N features
+        results = self.evaluate_top_n_features(self.model, X_train, y_train, X_val, y_val, groups_size_train, groups_size_val, importances_df, feature_counts)
+        
+        return results
+    
+    def get_feature_importance(self, model:LGBMRankerModel, feature_names):
+        """
+        Extracts feature importance from a trained LightGBM model.
+        `importance_type` can be "split" or "gain".
+        """
+        importance = model.ranker.feature_importances_
+        feature_importance_df = pd.DataFrame({
+            "feature": feature_names,
+            "importance": importance
+        }).sort_values(by="importance", ascending=False).reset_index(drop=True)
+        if os.path.exists("data/feature_importance.parquet"):
+            os.remove("data/feature_importance.parquet")
+        feature_importance_df.to_parquet("data/feature_importance.parquet")
+        return feature_importance_df
+    
+    def evaluate_top_n_features(self, model:LGBMRankerModel, X_train, y_train, X_val, y_val, groups_size_train, groups_size_val, importances_df:pd.DataFrame, feature_counts):
+        """
+        Trains and evaluates LightGBM Ranker using top N features.
+        Returns performance for each N.
+        """
+        results = []
+
+        for n in feature_counts:
+            top_features = importances_df.head(n)['feature'].tolist()
+            scores = []
+            X_train_i, X_val_i = X_train[top_features], X_val[top_features]
+
+            model_i = copy.deepcopy(model)
+            model_i.fit(X_train_i, y_train, X_val_i, y_val, groups_size_train, groups_size_val)
+
+            score = model_i.ranker.best_score_['valid_0']['ndcg@5']
+            scores.append(score)
+
+            avg_score = np.mean(scores)
+            results.append((n, avg_score))
+            print(f"Top {n} features: NDCG@5 = {avg_score:.4f}")
+
+        return results
