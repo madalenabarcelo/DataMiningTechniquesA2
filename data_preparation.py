@@ -26,7 +26,7 @@ class DataPreparer:
 
         self.categorical_features_threshold = categorical_features_threshold if categorical_features_threshold is not None else {}
         # self.categorical_features_threshold = {}
-        
+        self.new_prop_id_features = []
 
     def load_and_preprocess_data(self, old_file_name: str, new_file_name:Optional[str] = None, upload:bool = True) -> Optional[pd.DataFrame]:
         """
@@ -153,24 +153,97 @@ class DataPreparer:
         """
         Add features to the DataFrame.
         """
+        df = self.add_prop_id_features(df)
+
         df = df.with_columns([
             pl.col("srch_id").count().over("srch_id").alias("result_count"),
             pl.when(pl.col("visitor_location_country_id") == pl.col("prop_country_id"))
             .then(1).otherwise(0).cast(pl.Int8).alias("prop_in_visitor_country"),
         ])
 
+        # Relative price to the mean price in the search, absolute and relative
+        df = df.with_columns([
+            (pl.col("price_usd") - pl.col("price_usd").mean().over("srch_id"))
+            .alias("price_usd_diff_from_mean_in_search"),
+            (pl.col("price_usd") / pl.col("price_usd").mean().over("srch_id"))
+            .alias("price_usd_ratio_to_mean_in_search"),
+        ])
+
+        # Rank of hotel in search based on location score, review score and price
+        df = df.with_columns([
+            pl.col("prop_location_score1").rank("dense").over("srch_id").alias("rank_loc_score1_in_search"),
+            pl.col("prop_review_score").rank("dense").over("srch_id").alias("rank_review_score_in_search"),
+            pl.col("price_usd").rank("dense").over("srch_id").alias("rank_price_in_search"),
+        ])
+
+        # Some basic interaction features
+        df = df.with_columns([
+            (pl.col("price_usd") / (pl.col("srch_adults_count") + pl.col("srch_children_count") + 1e-5))
+            .alias("price_per_person"),
+            (pl.col("price_usd") / (pl.col("srch_length_of_stay") + 1e-5)).alias("price_per_night")
+        ])
+
+        ### Second iteration of a bunch of new features
+        def cyclical_encode(df:pl.DataFrame, col, max_val):
+            df = df.with_columns([
+                (2 * np.pi * pl.col(col) / max_val).alias(f"{col}_angle")
+            ])
+            df = df.with_columns([
+                pl.col(f"{col}_angle").sin().alias(f"{col}_sin"),
+                pl.col(f"{col}_angle").cos().alias(f"{col}_cos"),
+            ]).drop(f"{col}_angle")
+            return df
+
+        df = cyclical_encode(df, "hour", 24)
+        df = cyclical_encode(df, "weekday", 7)
+        df = cyclical_encode(df, "month", 12)
+        
+        price_mean_in_search = df.group_by("srch_id").agg(
+            pl.col("price_usd").mean().alias("price_usd_mean_in_search")
+        )
+
+        df = df.join(price_mean_in_search, on="srch_id", how="left")
+
+        df = df.with_columns([
+            (pl.col("price_usd") * pl.col("prop_starrating")).alias("price_x_starrating"),
+            (pl.col("price_per_night") * pl.col("prop_location_score2")).alias("price_night_x_locscore2"),
+            (pl.col("price_usd") / (pl.col("price_usd_mean_over_prop_id") + 1e-6)).alias("price_to_prop_avg_ratio"),
+            (pl.col("price_usd") - pl.col("price_usd_mean_in_search")).alias("price_diff_from_search_mean"),
+            (pl.col("price_usd") / (pl.col("price_usd_mean_in_search") + 1e-6)).alias("price_ratio_to_search_mean"),
+            (pl.col("prop_brand_bool") * pl.col("prop_in_visitor_country")).alias("brand_and_in_visitor_country"),
+        ])
+
+        visitor_booking_window_avg = df.group_by("visitor_location_country_id").agg(pl.col("srch_booking_window").mean().alias("visitor_country_avg_booking_window"))
+        df = df.join(visitor_booking_window_avg, on="visitor_location_country_id", how="left")
+
+        dest_los_median = df.group_by("srch_destination_id").agg(pl.col("srch_length_of_stay").median().alias("dest_median_los"))
+        df = df.join(dest_los_median, on="srch_destination_id", how="left")
+
+        return df
+    
+    def add_prop_id_features(self, df: pl.DataFrame) -> pl.DataFrame:
         # Add averages per prop_id (mainly just to reduce noise I think in pricing)
         for col in ["price_usd", "prop_log_historical_price", "prop_location_score1", "prop_location_score2"]:
             df = df.with_columns([
                 pl.col(col).mean().over("prop_id").cast(pl.Float32).alias(f"{col}_mean_over_prop_id"),
                 pl.col(col).std().over("prop_id").cast(pl.Float32).alias(f"{col}_std_over_prop_id"),
             ])
+            self.new_prop_id_features.append(f"{col}_mean_over_prop_id")
+            self.new_prop_id_features.append(f"{col}_std_over_prop_id")
 
         for col in ["prop_starrating", "prop_review_score"]:
             df = df.with_columns([
                 pl.col(col).median().over("prop_id").cast(pl.Float32).alias(f"{col}_median_over_prop_id"),
                 pl.col(col).std().over("prop_id").cast(pl.Float32).alias(f"{col}_std_over_prop_id"),
             ])
+            self.new_prop_id_features.append(f"{col}_median_over_prop_id")
+            self.new_prop_id_features.append(f"{col}_std_over_prop_id")
+
+        # Add the number of times a property has been searched
+        df = df.with_columns([
+            pl.col("prop_id").count().over("prop_id").alias("prop_id_count")
+        ])
+        self.new_prop_id_features.append("prop_id_count")
         return df
     
     def reduce_cardinality(self, df: pl.DataFrame) -> pl.DataFrame:
@@ -198,9 +271,10 @@ class DataPreparer:
         # This first batch was acting difficult so im just doing it manually (due to nan values in int columns)
         for col in [f"comp{i}_rate_percent_diff" for i in range(1, 9)]:
             df_pd[col] = df_pd[col].astype("Int32")
-        # These are then the other comp columns that were annoying
+
+        # These are then the other comp columns that were annoying, and now some other so just keep them float32
         for col in df_pd.select_dtypes(include=["float64"]).columns:
-            df_pd[col] = df_pd[col].astype("Int8")
+            df_pd[col] = df_pd[col].astype("float32")
 
         # With pandas we can use the float16 type
         # For some reason the price_usd columns return inf values so we'll just keep them as float32

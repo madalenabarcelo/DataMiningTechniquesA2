@@ -80,7 +80,7 @@ class FeatureTester:
 
         return df
     
-    def objective(self, trial, X_train, y_train, X_val, y_val, groups_size_train, groups_size_val) -> float:
+    def light_hpo_objective(self, trial, X_train, y_train, X_val, y_val, groups_size_train, groups_size_val) -> float:
         # Define search space
         params = {
             "objective": "lambdarank",
@@ -95,6 +95,8 @@ class FeatureTester:
             "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 1.0, log=True),
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 1.0, log=True)
         }
+        if not self.model.new_categorical_features:
+            self.model.new_categorical_features = self.model.categorical_features
 
         scores = []
 
@@ -104,7 +106,7 @@ class FeatureTester:
             eval_set=[(X_val, y_val)],
             eval_group=[groups_size_val],
             callbacks=[early_stopping(80), log_evaluation(100)],
-            categorical_feature=self.model.categorical_features)
+            categorical_feature=self.model.new_categorical_features)
         
         # Use NDCG@5 as evaluation
         ndcg = model.best_score_['valid_0']['ndcg@5']
@@ -114,26 +116,28 @@ class FeatureTester:
 
     def run_light_hpo(self, X_train, y_train, X_val, y_val, groups_size_train, groups_size_val, n_trials=30):
         study = optuna.create_study(direction="maximize")
-        study.optimize(lambda trial: self.objective(trial, X_train, y_train, X_val, y_val, groups_size_train, groups_size_val), n_trials=n_trials)
+        study.optimize(lambda trial: self.light_hpo_objective(trial, X_train, y_train, X_val, y_val, groups_size_train, groups_size_val), n_trials=n_trials)
         print("Best trial:")
         print(study.best_trial)
         return study.best_params
     
-    def full_feature_selection(self, train_df, feature_counts):
+    def full_feature_selection(self, train_df, feature_counts, params):
         """
         Full feature selection using LightGBM Ranker.
         Returns the best features and their importance.
         """
-        X_train, y_train, X_val, y_val, groups_size_train, groups_size_val = self.model.format_data(train_df)
-        # First train the model with all features
-        model_full = copy.deepcopy(self.model)
-        model_full.fit(X_train, y_train, X_val, y_val, groups_size_train, groups_size_val)
+        # X_train, y_train, X_val, y_val, groups_size_train, groups_size_val = self.model.format_data(train_df)
+
+        # # First train the model with all features
+        # model_full = copy.deepcopy(self.model)
+        # model_full.fit(X_train, y_train, X_val, y_val, groups_size_train, groups_size_val)
 
         # Get feature importance
-        importances_df = self.get_feature_importance(model_full,self.model.feature_cols)
+        # importances_df = self.get_feature_importance(model_full,self.model.feature_cols)
+        importances_df = pd.read_parquet("data/feature_importance.parquet")
         
         # Evaluate top N features
-        results = self.evaluate_top_n_features(self.model, X_train, y_train, X_val, y_val, groups_size_train, groups_size_val, importances_df, feature_counts)
+        results = self.evaluate_top_n_features(self.model, train_df, importances_df, feature_counts, params)
         
         return results
     
@@ -152,26 +156,82 @@ class FeatureTester:
         feature_importance_df.to_parquet("data/feature_importance.parquet")
         return feature_importance_df
     
-    def evaluate_top_n_features(self, model:LGBMRankerModel, X_train, y_train, X_val, y_val, groups_size_train, groups_size_val, importances_df:pd.DataFrame, feature_counts):
+    def evaluate_top_n_features(self, model:LGBMRankerModel, train_df, importances_df:pd.DataFrame, feature_counts, params):
         """
         Trains and evaluates LightGBM Ranker using top N features.
         Returns performance for each N.
         """
         results = []
-
+        X, Y, groups = model.get_X_y_groups(train_df)
         for n in feature_counts:
             top_features = importances_df.head(n)['feature'].tolist()
-            scores = []
-            X_train_i, X_val_i = X_train[top_features], X_val[top_features]
-
-            model_i = copy.deepcopy(model)
-            model_i.fit(X_train_i, y_train, X_val_i, y_val, groups_size_train, groups_size_val)
-
-            score = model_i.ranker.best_score_['valid_0']['ndcg@5']
-            scores.append(score)
+            print(f"Evaluating top {n} features")
+            categorical_features = self.model.update_categorical_features(top_features)
+            scores = self.run_k_fold_optimization(X[top_features], Y, groups, params, categorical_features)
 
             avg_score = np.mean(scores)
             results.append((n, avg_score))
             print(f"Top {n} features: NDCG@5 = {avg_score:.4f}")
 
         return results
+
+    def run_k_fold_optimization(self, X, y, groups, params, categorical_features:list = None, early_stopping_rounds:int=80, verbose:int=250):
+        if not self.model.new_categorical_features:
+            self.model.new_categorical_features = self.model.categorical_features
+
+        gkf = GroupKFold(n_splits=3)
+        scores = []
+        i = 0
+        for train_idx, val_idx in gkf.split(X, y, groups):
+            X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
+            groups_train, groups_val = groups[train_idx], groups[val_idx]
+            # Get the group sizes
+            groups_size_train = np.bincount(groups_train)  # counts per srch_id
+            groups_size_val = np.bincount(groups_val)
+            # Remove zeros from the group sizes
+            groups_size_train = groups_size_train[groups_size_train > 0]
+            groups_size_val = groups_size_val[groups_size_val > 0]
+            i += 1
+            print(f"Training on fold {i}")
+            model = LGBMRanker(**params)
+            model.fit(
+                X_train, y_train,
+                group=groups_size_train,
+                eval_set=[(X_val, y_val)],
+                eval_group=[groups_size_val],
+                callbacks=[early_stopping(early_stopping_rounds), log_evaluation(verbose)],
+                categorical_feature=self.model.new_categorical_features
+            )
+            score = model.best_score_["valid_0"]["ndcg@5"]
+            scores.append(score)
+        return scores
+        
+    def full_hpo_objective(self, trial, X, y, groups, early_stopping_rounds:int=50, verbose:int=250):
+        params = {
+            "objective": "lambdarank",
+            "metric": "ndcg",
+            "ndcg_eval_at": [5],
+            "boosting_type": "gbdt",
+            "verbosity": -1,
+            "n_estimators": 500,
+            "early_stopping_round": 30,
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 20, 200),
+            "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
+            "min_child_weight": trial.suggest_float("min_child_weight", 1e-3, 10, log=True),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10, log=True),
+        }
+        scores = self.run_k_fold_optimization(X, y, groups, params, early_stopping_rounds, verbose)
+        
+        print(f"Best Mean Score for all folds: {np.mean(scores)}, with params: {params}")
+        return np.mean(scores)
+    
+    def run_full_hpo(self, df, n_trials=50):
+        study = optuna.create_study(direction="maximize")
+        X, y, groups = self.model.get_X_y_groups(df)
+        study.optimize(lambda trial: self.full_hpo_objective(trial, X, y, groups), n_trials=n_trials)
+        return study
