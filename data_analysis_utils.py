@@ -3,6 +3,7 @@ import polars as pl
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 
 class DataExplorer:
     def __init__(self):
@@ -47,43 +48,89 @@ class DataExplorer:
             "numeric_stats": numeric_stats,
         }
 
-    
-    def get_expedia_data_plots(self, df: pd.DataFrame, max_bins=50, max_columns=20):
-        """
-        Generate plots for key data characteristics in a wide-format Expedia dataset.
-        """
+    def plot_missing_values_both(self, train_df, test_df):
+        # Calculate missing counts
+        missing_train = train_df.isnull().sum()
+        missing_train = missing_train[missing_train > 0].sort_values(ascending=False)
+        missing_test = test_df.isnull().sum()
+        missing_test = missing_test.reindex(missing_train.index).fillna(0)  # Align index, fill NaNs with 0
 
-        # Plot missing values
-        missing = df.isnull().sum()
-        missing = missing[missing > 0].sort_values(ascending=False)
-        if not missing.empty:
-            plt.figure(figsize=(12, 6))
-            sns.barplot(x=missing.index, y=missing.values, palette="viridis")
-            plt.title("Missing Values per Column")
-            plt.ylabel("Count")
-            plt.xticks(rotation=90)
-            plt.tight_layout()
-            plt.show()
+        # Combine into one DataFrame for plotting
+        missing_df = pd.DataFrame({
+            'column': missing_train.index.tolist() * 2,
+            'missing_count': list(missing_train.values) + list(missing_test.values),
+            'dataset': ['train'] * len(missing_train) + ['test'] * len(missing_test)
+        })
 
-        # Plot cardinality of each column (number of unique values)
-        unique_counts = df.nunique().sort_values(ascending=False)
         plt.figure(figsize=(12, 6))
-        sns.barplot(x=unique_counts.index[:max_columns], y=unique_counts.values[:max_columns], palette="crest")
-        plt.title(f"Top {max_columns} Columns by Unique Value Count")
+        sns.barplot(data=missing_df, x='column', y='missing_count', hue='dataset', palette='viridis')
+        plt.title("Missing Values per Column (Train vs Test)")
+        plt.ylabel("Count")
         plt.xticks(rotation=90)
-        plt.ylabel("Unique Values")
         plt.tight_layout()
         plt.show()
 
-        # Plot distribution for numeric columns
-        num_cols = df.select_dtypes(include=[int, float]).columns
-        for col in num_cols[:max_columns]:  # Limit to first N columns for speed
+    
+    def get_expedia_data_plots(self, train_df: pd.DataFrame, test_df: pd.DataFrame, max_bins=50, max_columns=20):
+        """
+        Generate comparison plots for train and test Expedia datasets.
+        """
+
+        # Add source label
+        train_df = train_df.copy()
+        test_df = test_df.copy()
+        train_df["dataset"] = "train"
+        test_df["dataset"] = "test"
+
+        df_combined = pd.concat([train_df, test_df], ignore_index=True)
+
+        self.plot_missing_values_both(train_df, test_df)
+
+        
+
+        # Specify the variables of interest
+        cat_vars = ['site_id', 'visitor_location_country_id', 'prop_country_id', 'srch_destination_id']
+
+        # Compute unique counts
+        unique_counts_train = train_df[cat_vars].nunique()
+        unique_counts_test = test_df[cat_vars].nunique()
+
+        # Create DataFrame for plotting
+        unique_df = pd.DataFrame({
+            'column': unique_counts_train.index,
+            'train': unique_counts_train.values,
+            'test': unique_counts_test.reindex(unique_counts_train.index).values
+        })
+
+        # Melt for seaborn
+        unique_df_melted = unique_df.melt(id_vars="column", var_name="dataset", value_name="unique_count")
+
+        # Plot
+        plt.figure(figsize=(8, 5))
+        sns.barplot(data=unique_df_melted, x="column", y="unique_count", hue="dataset", palette="Set2")
+        plt.title("Unique Value Count: Selected Categorical Features (Train vs Test)")
+        plt.ylabel("Unique Values")
+        plt.xticks(rotation=0)
+        plt.tight_layout()
+        plt.show()
+
+        # --- Numeric Distributions ---
+        num_cols = train_df.select_dtypes(include=[int, float]).columns.intersection(test_df.columns)
+
+        for col in num_cols[:max_columns]:
+            combined_data = df_combined[col].dropna()
+
+            # Compute consistent bins for train & test
+            bin_edges = np.histogram_bin_edges(combined_data, bins=max_bins)
+
             plt.figure(figsize=(8, 4))
-            sns.histplot(df[col].dropna(), bins=max_bins, kde=True)
-            plt.title(f"Distribution of {col}")
+            sns.histplot(data=df_combined, x=col, hue="dataset", bins=bin_edges,
+                        kde=True, element="step", stat="density", common_norm=False)
+            plt.title(f"Distribution of {col} (Train vs Test)")
             plt.xlabel(col)
             plt.tight_layout()
             plt.show()
+
 
 
     def plot_missing_values(self, df):
